@@ -1,0 +1,38 @@
+# 模型权重
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# 数据集和缓存
+data/
+datasets/
+images/
+cache/
+.huggingface/
+
+# 输出文件
+outputs/
+results/
+*.pkl
+*.json
+*.csv
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# 环境配置
+.env
+venv/
+conda_env/
+requirements.txt
+
+# 日志和临时文件
+*.log
+*.tmp
+*.swp
+.DS_Store
