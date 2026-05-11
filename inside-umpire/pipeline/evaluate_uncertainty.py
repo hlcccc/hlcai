@@ -4,6 +4,10 @@ import numpy as np
 import pandas as pd
 import argparse
 from tqdm import tqdm
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
 
 import sys
 sys.path.append(".")
@@ -148,9 +152,96 @@ for feature_type in layer_feature_types:
         strategy_name = strategy.replace('%', 'pct').replace('layer_', '')
         layer_columns.append(f'uncertainty_layer_{feature_type}_{strategy_name}')
 
+print('\n' + '='*60)
+print('STEP 1: Normalizing features')
+print('='*60)
+
+scaler = StandardScaler()
+image_df[layer_columns] = scaler.fit_transform(image_df[layer_columns])
+
+baseline_cols = ['uncertainty_avg_entropy', 'uncertainty_avg_confidence', 'uncertainty_early_stop_rate', 'uncertainty_generation_diversity']
+image_df[baseline_cols] = scaler.fit_transform(image_df[baseline_cols])
+
+eval_col = 'exact_match' if 'exact_match' in image_df.columns else 'correct'
+labels = image_df[eval_col].values
+
+print('\n' + '='*60)
+print('STEP 2: Training fusion model')
+print('='*60)
+
+fusion_features = layer_columns + baseline_cols
+X = image_df[fusion_features].values
+
+X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=0.2, random_state=42)
+
+clf = LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced')
+clf.fit(X_train, y_train)
+
+y_pred = clf.predict_proba(X_test)[:, 1]
+fusion_auc = roc_auc_score(y_test, y_pred)
+print(f'Fusion model AUC on test set: {fusion_auc:.4f}')
+
+image_df['fusion_uncertainty'] = clf.predict_proba(X)[:, 1]
+
+print('\n' + '='*60)
+print('STEP 3: Cross-layer fusion')
+print('='*60)
+
+cross_layer_features = []
+for feature_type in layer_feature_types:
+    ft_cols = [f'uncertainty_layer_{feature_type}_{s.replace("%", "pct").replace("layer_", "")}' for s in layer_strategies]
+    valid_cols = [col for col in ft_cols if col in image_df.columns]
+    if valid_cols:
+        col_name = f'cross_layer_{feature_type}'
+        image_df[col_name] = image_df[valid_cols].mean(axis=1)
+        cross_layer_features.append(col_name)
+
+X_cross = image_df[cross_layer_features].values
+X_c_train, X_c_test, y_c_train, y_c_test = train_test_split(X_cross, labels, test_size=0.2, random_state=42)
+
+clf_cross = LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced')
+clf_cross.fit(X_c_train, y_c_train)
+y_c_pred = clf_cross.predict_proba(X_c_test)[:, 1]
+cross_auc = roc_auc_score(y_c_test, y_c_pred)
+print(f'Cross-layer fusion AUC: {cross_auc:.4f}')
+
+image_df['cross_layer_fusion'] = clf_cross.predict_proba(X_cross)[:, 1]
+
+print('\n' + '='*60)
+print('STEP 4: Final combined uncertainty')
+print('='*60)
+
+final_features = cross_layer_features + baseline_cols
+X_final = image_df[final_features].values
+X_f_train, X_f_test, y_f_train, y_f_test = train_test_split(X_final, labels, test_size=0.2, random_state=42)
+
+clf_final = LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced')
+clf_final.fit(X_f_train, y_f_train)
+y_f_pred = clf_final.predict_proba(X_f_test)[:, 1]
+final_auc = roc_auc_score(y_f_test, y_f_pred)
+print(f'Final combined AUC: {final_auc:.4f}')
+
+image_df['final_combined_uncertainty'] = clf_final.predict_proba(X_final)[:, 1]
+
+print('\n' + '='*60)
+print('Feature Importance Analysis')
+print('='*60)
+weights = clf_final.coef_[0]
+feature_importance = pd.DataFrame({
+    'feature': final_features,
+    'weight': weights,
+    'abs_weight': np.abs(weights)
+}).sort_values('abs_weight', ascending=False)
+
+print('\nTop 10 most important features:')
+for i, (_, row) in enumerate(feature_importance.head(10).iterrows()):
+    sign = '+' if row['weight'] > 0 else '-'
+    print(f'  {i+1:2d}. {sign} {row["feature"]:40} | weight: {row["weight"]:.4f}')
+
 unc_col_to_eval_list = ['umpire', 'uncertainty_avg_entropy', 'uncertainty_avg_confidence',
                         'uncertainty_early_stop_rate', 'uncertainty_generation_diversity',
-                        'combined_uncertainty'] + layer_columns
+                        'combined_uncertainty', 'fusion_uncertainty', 
+                        'cross_layer_fusion', 'final_combined_uncertainty'] + layer_columns
 conf_col_to_eval_list = []
 
 def update_result_based_on_df(image_df, cpc_num_bins=50, ece_num_bins=15, eval_col='exact_match'):
