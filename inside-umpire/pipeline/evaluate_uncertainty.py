@@ -12,21 +12,14 @@ from sklearn.metrics import roc_auc_score
 import sys
 sys.path.append(".")
 
-from modules.eval_utils import ROC_AUROC, compute_pearsonr, get_calibrate_ece, get_tpr_at_fpr, compute_aurac_from_image_df, \
-    df_to_markdown_bold
-from modules.logdet_utils import normalize_embedding, get_normL1_prob, compute_logdet, \
-    compute_probL1_logdet, get_normalized_entropy, compute_eigenscore
-from modules.uncertainty_utils import compute_uncertainty_score
+from modules.eval_utils import ROC_AUROC, compute_pearsonr, get_calibrate_ece, get_tpr_at_fpr, compute_aurac_from_image_df, df_to_markdown_bold
+from modules.logdet_utils import normalize_embedding, get_normL1_prob, compute_logdet, compute_probL1_logdet, get_normalized_entropy, compute_eigenscore
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--generation_file', type=str, required=True,
-                   help='Path to the generation file with uncertainty info')
-parser.add_argument('--output_dir', type=str, required=True,
-                   help='Directory to save the output files')
-parser.add_argument('--jitter', type=float, default=1e-8,
-                   help='Jitter value for numerical stability in logdet computation')
-parser.add_argument('--uncertainty_weight', type=float, default=0.5,
-                   help='Weight for combining entropy and variance in uncertainty score')
+parser.add_argument('--generation_file', type=str, required=True, help='Path to the generation file with uncertainty info')
+parser.add_argument('--output_dir', type=str, required=True, help='Directory to save the output files')
+parser.add_argument('--jitter', type=float, default=1e-8)
+parser.add_argument('--uncertainty_weight', type=float, default=0.5)
 
 args = parser.parse_args()
 
@@ -68,18 +61,6 @@ def compute_generation_diversity(generations_text):
     unique_generations = len(set(generations_text))
     return unique_generations / len(generations_text)
 
-image_df['norm_embedding'] = image_df['embedding'].apply(normalize_embedding)
-
-image_df['logdet'] = image_df['norm_embedding'].apply(lambda x: compute_logdet(np.matmul(x, x.T), alpha=args.jitter))
-
-prob_values = image_df['generations_log_likelihood'].apply(get_normL1_prob)
-logdet_values = image_df['logdet']
-prob_alpha = np.abs(logdet_values.median() / prob_values.median())
-prob_param = prob_alpha
-print("adaptive prob alpha", prob_param)
-
-image_df['umpire'] = image_df.apply(lambda x: compute_probL1_logdet(x, alpha=prob_param), axis=1)
-
 def get_layer_feature_by_strategy(uncertainty_info, strategy, feature_name):
     if not uncertainty_info or 'layer_features_by_strategy' not in uncertainty_info:
         return 0.0
@@ -89,7 +70,6 @@ def get_layer_feature_by_strategy(uncertainty_info, strategy, feature_name):
 def get_uncertainty_signal(row, signal_type='avg_entropy'):
     if 'uncertainty_info' not in row:
         return 0.0
-
     uncertainty_values = []
     for uncertainty_info in row['uncertainty_info']:
         if signal_type == 'avg_entropy':
@@ -106,209 +86,211 @@ def get_uncertainty_signal(row, signal_type='avg_entropy'):
                 feature_name = parts[1]
                 strategy = '_'.join(parts[2:])
                 uncertainty_values.append(get_layer_feature_by_strategy(uncertainty_info, strategy, feature_name))
-
     if not uncertainty_values:
         return 0.0
+    return np.mean(uncertainty_values)
 
-    if signal_type in ['avg_entropy', 'early_stop_rate', 'generation_diversity'] or signal_type.startswith('layer_'):
-        return np.mean(uncertainty_values)
-    elif signal_type == 'avg_confidence':
-        return np.mean(uncertainty_values)
+# === COMPUTE BASELINE FEATURES ===
+image_df['norm_embedding'] = image_df['embedding'].apply(normalize_embedding)
+image_df['logdet'] = image_df['norm_embedding'].apply(lambda x: compute_logdet(np.matmul(x, x.T), alpha=args.jitter))
 
-def get_per_sample_uncertainty(row, alpha=0.5):
-    avg_entropy = get_uncertainty_signal(row, 'avg_entropy')
-    early_stop_rate = get_uncertainty_signal(row, 'early_stop_rate')
+prob_values = image_df['generations_log_likelihood'].apply(get_normL1_prob)
+logdet_values = image_df['logdet']
+prob_alpha = np.abs(logdet_values.median() / prob_values.median())
+prob_param = prob_alpha
+print("adaptive prob alpha", prob_param)
 
-    avg_entropy_normalized = avg_entropy / (np.log(50000) + 1e-8)
-    combined_uncertainty = alpha * avg_entropy_normalized + (1 - alpha) * early_stop_rate
-
-    return combined_uncertainty
-
+image_df['umpire'] = image_df.apply(lambda x: compute_probL1_logdet(x, alpha=prob_param), axis=1)
 image_df['uncertainty_avg_entropy'] = image_df.apply(lambda x: get_uncertainty_signal(x, 'avg_entropy'), axis=1)
 image_df['uncertainty_avg_confidence'] = image_df.apply(lambda x: get_uncertainty_signal(x, 'avg_confidence'), axis=1)
 image_df['uncertainty_early_stop_rate'] = image_df.apply(lambda x: get_uncertainty_signal(x, 'early_stop_rate'), axis=1)
 image_df['uncertainty_generation_diversity'] = image_df.apply(lambda x: get_uncertainty_signal(x, 'generation_diversity'), axis=1)
-image_df['combined_uncertainty'] = image_df.apply(lambda x: get_per_sample_uncertainty(x, alpha=args.uncertainty_weight), axis=1)
 
+# === DEFINE LAYER STRATEGIES AND FEATURE TYPES ===
 layer_strategies = [
     'layer_0', 'layer_3', 'layer_6', 'layer_9', 
     'layer_12', 'layer_15', 'layer_18', 'layer_21',
     'last_layer', 'mean_pooling'
 ]
+
 layer_feature_types = [
     'mean', 'var', 'std', 'max', 'min', 'range', 
     'skew', 'kurt', 'norm', 'logdet', 'eigen_score'
 ]
 
-for strategy in layer_strategies:
+# === EXTRACT ALL LAYER FEATURES ===
+print('\nExtracting layer features...')
+all_layer_feature_cols = []
+for strategy in tqdm(layer_strategies):
     strategy_name = strategy.replace('%', 'pct').replace('layer_', '')
     for feature_type in layer_feature_types:
         col_name = f'uncertainty_layer_{feature_type}_{strategy_name}'
         image_df[col_name] = image_df.apply(lambda x, s=strategy, t=feature_type: get_uncertainty_signal(x, f'layer_{t}_{s}'), axis=1)
+        all_layer_feature_cols.append(col_name)
 
-layer_columns = []
-for feature_type in layer_feature_types:
-    for strategy in layer_strategies:
-        strategy_name = strategy.replace('%', 'pct').replace('layer_', '')
-        layer_columns.append(f'uncertainty_layer_{feature_type}_{strategy_name}')
-
+# === STEP 1: FEATURE NORMALIZATION ===
 print('\n' + '='*60)
 print('STEP 1: Normalizing features')
 print('='*60)
 
 scaler = StandardScaler()
-image_df[layer_columns] = scaler.fit_transform(image_df[layer_columns])
+image_df[all_layer_feature_cols] = scaler.fit_transform(image_df[all_layer_feature_cols])
 
 baseline_cols = ['uncertainty_avg_entropy', 'uncertainty_avg_confidence', 'uncertainty_early_stop_rate', 'uncertainty_generation_diversity']
 image_df[baseline_cols] = scaler.fit_transform(image_df[baseline_cols])
 
+# === STEP 2: PREPARE LABELS ===
 eval_col = 'exact_match' if 'exact_match' in image_df.columns else 'correct'
 labels = image_df[eval_col].values
 
+# === STEP 3: CROSS-LAYER FEATURE FUSION (RECOMMENDED) ===
 print('\n' + '='*60)
-print('STEP 2: Training fusion model')
-print('='*60)
-
-fusion_features = layer_columns + baseline_cols
-X = image_df[fusion_features].values
-
-X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=0.2, random_state=42)
-
-clf = LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced')
-clf.fit(X_train, y_train)
-
-y_pred = clf.predict_proba(X_test)[:, 1]
-fusion_auc = roc_auc_score(y_test, y_pred)
-print(f'Fusion model AUC on test set: {fusion_auc:.4f}')
-
-image_df['fusion_uncertainty'] = clf.predict_proba(X)[:, 1]
-
-print('\n' + '='*60)
-print('STEP 3: Cross-layer fusion')
+print('STEP 3: Cross-layer feature fusion')
 print('='*60)
 
 cross_layer_features = []
 for feature_type in layer_feature_types:
-    ft_cols = [f'uncertainty_layer_{feature_type}_{s.replace("%", "pct").replace("layer_", "")}' for s in layer_strategies]
-    valid_cols = [col for col in ft_cols if col in image_df.columns]
+    layer_cols = [f'uncertainty_layer_{feature_type}_{s.replace("%", "pct").replace("layer_", "")}' for s in layer_strategies]
+    valid_cols = [col for col in layer_cols if col in image_df.columns]
     if valid_cols:
         col_name = f'cross_layer_{feature_type}'
         image_df[col_name] = image_df[valid_cols].mean(axis=1)
         cross_layer_features.append(col_name)
 
-X_cross = image_df[cross_layer_features].values
-X_c_train, X_c_test, y_c_train, y_c_test = train_test_split(X_cross, labels, test_size=0.2, random_state=42)
-
-clf_cross = LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced')
-clf_cross.fit(X_c_train, y_c_train)
-y_c_pred = clf_cross.predict_proba(X_c_test)[:, 1]
-cross_auc = roc_auc_score(y_c_test, y_c_pred)
-print(f'Cross-layer fusion AUC: {cross_auc:.4f}')
-
-image_df['cross_layer_fusion'] = clf_cross.predict_proba(X_cross)[:, 1]
-
+# === STEP 4: TRAIN FUSION MODEL ON DEV SET ===
 print('\n' + '='*60)
-print('STEP 4: Final combined uncertainty')
+print('STEP 4: Training fusion model on dev set')
 print('='*60)
 
 final_features = cross_layer_features + baseline_cols
-X_final = image_df[final_features].values
-X_f_train, X_f_test, y_f_train, y_f_test = train_test_split(X_final, labels, test_size=0.2, random_state=42)
+X = image_df[final_features].values
+
+X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=0.2, random_state=42)
 
 clf_final = LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced')
-clf_final.fit(X_f_train, y_f_train)
-y_f_pred = clf_final.predict_proba(X_f_test)[:, 1]
-final_auc = roc_auc_score(y_f_test, y_f_pred)
-print(f'Final combined AUC: {final_auc:.4f}')
+clf_final.fit(X_train, y_train)
 
-image_df['final_combined_uncertainty'] = clf_final.predict_proba(X_final)[:, 1]
+y_pred = clf_final.predict_proba(X_test)[:, 1]
+fusion_auc = roc_auc_score(y_test, y_pred)
+print(f'Fusion model AUC on test set: {fusion_auc:.4f}')
 
+image_df['final_combined_uncertainty'] = clf_final.predict_proba(X)[:, 1]
+
+# === STEP 5: UNSUPERVISED FEATURE COMBINATION ===
 print('\n' + '='*60)
-print('Feature Importance Analysis')
+print('STEP 5: Unsupervised feature combination')
 print('='*60)
-weights = clf_final.coef_[0]
-feature_importance = pd.DataFrame({
-    'feature': final_features,
-    'weight': weights,
-    'abs_weight': np.abs(weights)
-}).sort_values('abs_weight', ascending=False)
 
-print('\nTop 10 most important features:')
-for i, (_, row) in enumerate(feature_importance.head(10).iterrows()):
-    sign = '+' if row['weight'] > 0 else '-'
-    print(f'  {i+1:2d}. {sign} {row["feature"]:40} | weight: {row["weight"]:.4f}')
+image_df['unsupervised_risk'] = image_df[cross_layer_features].mean(axis=1)
 
-unc_col_to_eval_list = ['umpire', 'uncertainty_avg_entropy', 'uncertainty_avg_confidence',
-                        'uncertainty_early_stop_rate', 'uncertainty_generation_diversity',
-                        'combined_uncertainty', 'fusion_uncertainty', 
-                        'cross_layer_fusion', 'final_combined_uncertainty'] + layer_columns
-conf_col_to_eval_list = []
+# === STEP 6: EVALUATE ALL METHODS ===
+print('\n' + '='*60)
+print('STEP 6: Evaluating all uncertainty methods')
+print('='*60)
 
-def update_result_based_on_df(image_df, cpc_num_bins=50, ece_num_bins=15, eval_col='exact_match'):
-    image_correct_df = image_df.loc[image_df[eval_col] == 1]
-    image_wrong_df = image_df.loc[image_df[eval_col] == 0]
-
-    result_dict = {}
-    for col in conf_col_to_eval_list + unc_col_to_eval_list:
-        valid_mask = image_df[col].notna() & image_df[eval_col].notna()
-        valid_data_col = image_df.loc[valid_mask, col]
-        valid_data_eval = image_df.loc[valid_mask, eval_col]
-
-        if len(valid_data_col) < 2:
-            print(f"Skipping {col}: only {len(valid_data_col)} valid data points")
-            continue
-
-        if col in conf_col_to_eval_list:
-            auc = ROC_AUROC(image_wrong_df[col], image_correct_df[col])[-1]
-            cece = get_calibrate_ece(image_df, col, eval_col=eval_col, num_bins=ece_num_bins, random_seed=10, calibration_ratio=0.05, model_type='minmax', ece_mode='ece', is_uncertainty=False)
-            tpr_at_10_fpr = get_tpr_at_fpr(image_wrong_df[col], image_correct_df[col], 0.1)
-            tpr_at_1_fpr = get_tpr_at_fpr(image_wrong_df[col], image_correct_df[col], 0.01)
-            aurac = compute_aurac_from_image_df(image_df, col, uncertainty=False, eval_col=eval_col)
-            is_uncertainty = False
-        else:
-            auc = ROC_AUROC(image_correct_df[col], image_wrong_df[col])[-1]
-            cece = get_calibrate_ece(image_df, col, eval_col=eval_col, num_bins=ece_num_bins, random_seed=10, calibration_ratio=0.05, model_type='minmax', ece_mode='ece')
-            tpr_at_10_fpr = get_tpr_at_fpr(image_correct_df[col], image_wrong_df[col], 0.1)
-            tpr_at_1_fpr = get_tpr_at_fpr(image_correct_df[col], image_wrong_df[col], 0.01)
-            aurac = compute_aurac_from_image_df(image_df, col, uncertainty=True, eval_col=eval_col)
-            is_uncertainty = True
-
-        pearsonr = np.abs(compute_pearsonr(valid_data_col, valid_data_eval, num_bins=cpc_num_bins)[0])
-        result_dict[col] = {
+def evaluate_method(name, scores):
+    valid_idx = ~np.isnan(scores)
+    if np.sum(valid_idx) < 2:
+        return None
+    
+    valid_scores = scores[valid_idx]
+    valid_labels = labels[valid_idx]
+    
+    try:
+        auc = roc_auc_score(valid_labels, valid_scores)
+        cece = get_calibrate_ece(valid_scores, valid_labels, num_bins=15)
+        pearsonr = np.abs(compute_pearsonr(valid_scores, valid_labels, num_bins=50)[0])
+        tpr_at_01 = get_tpr_at_fpr(valid_scores, valid_labels, fpr=0.1)
+        tpr_at_001 = get_tpr_at_fpr(valid_scores, valid_labels, fpr=0.01)
+        aurac = compute_aurac_from_image_df(pd.DataFrame({'score': valid_scores, eval_col: valid_labels}), 'score', eval_col)
+        
+        return {
             'auc': auc,
             'cece': cece,
             'pearsonr': pearsonr,
-            'tpr_at_0.1_fpr': tpr_at_10_fpr,
-            'tpr_at_0.01_fpr': tpr_at_1_fpr,
+            'tpr_at_0.1_fpr': tpr_at_01,
+            'tpr_at_0.01_fpr': tpr_at_001,
             'aurac': aurac
         }
-    return result_dict
+    except Exception as e:
+        print(f"Error evaluating {name}: {e}")
+        return None
 
-result_dict = update_result_based_on_df(image_df, cpc_num_bins=50, ece_num_bins=15)
-result_df = pd.DataFrame().from_dict(result_dict, orient='index')
-result_df = result_df.applymap(lambda x: round(x, 3) if isinstance(x, (float, int)) else x)
-print(df_to_markdown_bold(result_df))
+# === EVALUATE KEY METHODS ===
+results = {}
 
-early_stop_summary = {
-    'total_samples': int(len(image_df)),
-    'samples_with_early_stop': int((image_df['uncertainty_early_stop_rate'] > 0).sum()),
-    'avg_early_stop_rate': float(image_df['uncertainty_early_stop_rate'].mean()),
-    'avg_token_entropy': float(image_df['uncertainty_avg_entropy'].mean()),
-    'avg_confidence': float(image_df['uncertainty_avg_confidence'].mean())
-}
-print("\n=== Early Warning Summary ===")
-for key, value in early_stop_summary.items():
-    print(f"{key}: {value}")
+# Baseline methods
+baseline_methods = [
+    ('umpire', image_df['umpire'].values),
+    ('entropy', image_df['uncertainty_avg_entropy'].values),
+    ('confidence', image_df['uncertainty_avg_confidence'].values),
+    ('early_stop_rate', image_df['uncertainty_early_stop_rate'].values),
+    ('generation_diversity', image_df['uncertainty_generation_diversity'].values),
+]
 
-if not os.path.exists(args.output_dir):
-    os.makedirs(args.output_dir)
+print('\n--- Baseline Methods ---')
+for name, scores in baseline_methods:
+    result = evaluate_method(name, scores)
+    if result:
+        results[name] = result
+        print(f'{name}: AUC = {result["auc"]:.4f}')
 
-result_json_file = os.path.join(args.output_dir, 'uncertainty_evaluation_results.json')
-result_df.to_json(result_json_file, orient='index', indent=4)
+# Fusion methods
+fusion_methods = [
+    ('fusion_cross_layer', image_df['final_combined_uncertainty'].values),
+    ('unsupervised_risk', image_df['unsupervised_risk'].values),
+]
 
-early_stop_json_file = os.path.join(args.output_dir, 'early_warning_summary.json')
-import json
-with open(early_stop_json_file, 'w') as f:
-    json.dump(early_stop_summary, f, indent=4)
+print('\n--- Fusion Methods ---')
+for name, scores in fusion_methods:
+    result = evaluate_method(name, scores)
+    if result:
+        results[name] = result
+        print(f'{name}: AUC = {result["auc"]:.4f}')
+
+# === PRINT RESULTS TABLE ===
+result_df = pd.DataFrame(results).T
+print(f"\n{'='*80}")
+print("FINAL EVALUATION RESULTS")
+print('='*80)
+print(f"\n{df_to_markdown_bold(result_df)}")
+
+# === SAVE RESULTS ===
+os.makedirs(args.output_dir, exist_ok=True)
+result_df.to_csv(os.path.join(args.output_dir, 'uncertainty_evaluation_results.csv'))
+image_df.to_pickle(os.path.join(args.output_dir, 'evaluation_results_with_features.pkl'))
 
 print(f"\nResults saved to {args.output_dir}")
+
+# === FEATURE IMPORTANCE ANALYSIS ===
+print('\n' + '='*80)
+print('FEATURE IMPORTANCE ANALYSIS')
+print('='*80)
+
+weights = pd.DataFrame({
+    'feature': final_features,
+    'weight': clf_final.coef_[0],
+    'abs_weight': np.abs(clf_final.coef_[0])
+}).sort_values('abs_weight', ascending=False)
+
+print('\nTop 10 most important features:')
+for i, (_, row) in enumerate(weights.head(10).iterrows()):
+    sign = '+' if row['weight'] > 0 else '-'
+    print(f'  {i+1:2d}. {sign} {row["feature"]:40} | weight: {row["weight"]:.4f}')
+
+# === FILTERING ANALYSIS ===
+print('\n' + '='*80)
+print('FILTERING ANALYSIS')
+print('='*80)
+
+fusion_score = image_df['final_combined_uncertainty'].values
+
+for percentile in [90, 95, 99]:
+    thr = np.percentile(fusion_score, percentile)
+    mask = fusion_score < thr
+    filtered_acc = np.mean(labels[mask]) if np.sum(mask) > 0 else 0.0
+    print(f'  Acc @ {percentile}% filter: {filtered_acc:.4f} (retained {np.sum(mask)}/{len(labels)})')
+
+print('\n' + '='*80)
+print('DONE!')
+print('='*80)
