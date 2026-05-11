@@ -81,6 +81,16 @@ def compute_layer_variance_by_strategy(uncertainty_info, strategy):
         return 0.0
     return uncertainty_info['layer_variances_by_strategy'].get(strategy, 0.0)
 
+def compute_layer_rep_norm_by_strategy(uncertainty_info, strategy):
+    if not uncertainty_info or 'layer_rep_norm_by_strategy' not in uncertainty_info:
+        return 0.0
+    return uncertainty_info['layer_rep_norm_by_strategy'].get(strategy, 0.0)
+
+def compute_layer_eigen_score_by_strategy(uncertainty_info, strategy):
+    if not uncertainty_info or 'layer_eigen_score_by_strategy' not in uncertainty_info:
+        return 0.0
+    return uncertainty_info['layer_eigen_score_by_strategy'].get(strategy, 0.0)
+
 def get_uncertainty_signal(row, signal_type='avg_entropy'):
     if 'uncertainty_info' not in row:
         return 0.0
@@ -98,11 +108,17 @@ def get_uncertainty_signal(row, signal_type='avg_entropy'):
         elif signal_type.startswith('layer_variance_'):
             strategy = signal_type.replace('layer_variance_', '')
             uncertainty_values.append(compute_layer_variance_by_strategy(uncertainty_info, strategy))
+        elif signal_type.startswith('layer_rep_norm_'):
+            strategy = signal_type.replace('layer_rep_norm_', '')
+            uncertainty_values.append(compute_layer_rep_norm_by_strategy(uncertainty_info, strategy))
+        elif signal_type.startswith('layer_eigen_score_'):
+            strategy = signal_type.replace('layer_eigen_score_', '')
+            uncertainty_values.append(compute_layer_eigen_score_by_strategy(uncertainty_info, strategy))
 
     if not uncertainty_values:
         return 0.0
 
-    if signal_type in ['avg_entropy', 'early_stop_rate', 'generation_diversity'] or signal_type.startswith('layer_variance_'):
+    if signal_type in ['avg_entropy', 'early_stop_rate', 'generation_diversity'] or signal_type.startswith('layer_'):
         return np.mean(uncertainty_values)
     elif signal_type == 'avg_confidence':
         return np.mean(uncertainty_values)
@@ -123,14 +139,21 @@ image_df['uncertainty_generation_diversity'] = image_df.apply(lambda x: get_unce
 image_df['combined_uncertainty'] = image_df.apply(lambda x: get_per_sample_uncertainty(x, alpha=args.uncertainty_weight), axis=1)
 
 layer_strategies = ['25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling']
+layer_signal_types = ['variance', 'rep_norm', 'eigen_score']
+
 for strategy in layer_strategies:
     strategy_name = strategy.replace('%', 'pct')
-    col_name = f'uncertainty_layer_variance_{strategy_name}'
-    image_df[col_name] = image_df.apply(lambda x: get_uncertainty_signal(x, f'layer_variance_{strategy}'), axis=1)
+    for signal_type in layer_signal_types:
+        col_name = f'uncertainty_layer_{signal_type}_{strategy_name}'
+        image_df[col_name] = image_df.apply(lambda x, s=strategy, t=signal_type: get_uncertainty_signal(x, f'layer_{t}_{s}'), axis=1)
+
+layer_columns = []
+for signal_type in layer_signal_types:
+    layer_columns.extend([f'uncertainty_layer_{signal_type}_{s.replace("%", "pct")}' for s in layer_strategies])
 
 unc_col_to_eval_list = ['umpire', 'uncertainty_avg_entropy', 'uncertainty_avg_confidence',
                         'uncertainty_early_stop_rate', 'uncertainty_generation_diversity',
-                        'combined_uncertainty'] + [f'uncertainty_layer_variance_{s.replace("%", "pct")}' for s in layer_strategies]
+                        'combined_uncertainty'] + layer_columns
 conf_col_to_eval_list = []
 
 def update_result_based_on_df(image_df, cpc_num_bins=50, ece_num_bins=15, eval_col='exact_match'):
@@ -139,12 +162,14 @@ def update_result_based_on_df(image_df, cpc_num_bins=50, ece_num_bins=15, eval_c
 
     result_dict = {}
     for col in conf_col_to_eval_list + unc_col_to_eval_list:
-        # 改进的数据检查
-        valid_data = image_df[col].dropna()
-        if len(valid_data) < 2:
-            print(f"Skipping {col}: only {len(valid_data)} valid data points")
+        valid_mask = image_df[col].notna() & image_df[eval_col].notna()
+        valid_data_col = image_df.loc[valid_mask, col]
+        valid_data_eval = image_df.loc[valid_mask, eval_col]
+
+        if len(valid_data_col) < 2:
+            print(f"Skipping {col}: only {len(valid_data_col)} valid data points")
             continue
-        
+
         if col in conf_col_to_eval_list:
             auc = ROC_AUROC(image_wrong_df[col], image_correct_df[col])[-1]
             cece = get_calibrate_ece(image_df, col, eval_col=eval_col, num_bins=ece_num_bins, random_seed=10, calibration_ratio=0.05, model_type='minmax', ece_mode='ece', is_uncertainty=False)
@@ -160,7 +185,7 @@ def update_result_based_on_df(image_df, cpc_num_bins=50, ece_num_bins=15, eval_c
             aurac = compute_aurac_from_image_df(image_df, col, uncertainty=True, eval_col=eval_col)
             is_uncertainty = True
 
-        pearsonr = np.abs(compute_pearsonr(image_df[col], image_df[eval_col], num_bins=cpc_num_bins)[0])
+        pearsonr = np.abs(compute_pearsonr(valid_data_col, valid_data_eval, num_bins=cpc_num_bins)[0])
         result_dict[col] = {
             'auc': auc,
             'cece': cece,

@@ -197,6 +197,8 @@ def predict_with_uncertainty(model, input_data, temperature, top_p, enable_early
         layer_strategies_to_eval = [args.layer_strategy]
     
     uncertainty_info['layer_variances_by_strategy'] = {}
+    uncertainty_info['layer_rep_norm_by_strategy'] = {}
+    uncertainty_info['layer_eigen_score_by_strategy'] = {}
 
     if args.enable_early_warning:
         monitor = EarlyWarningMonitor(
@@ -274,9 +276,21 @@ def predict_with_uncertainty(model, input_data, temperature, top_p, enable_early
                     extracted_state = extract_layer_signal(hidden, strategy, n_generated)
                     if extracted_state is not None and isinstance(extracted_state, torch.Tensor):
                         var = extracted_state.var(dim=0).mean().item()
+                        rep_norm = extracted_state.norm(dim=-1).mean().item()
+                        
+                        try:
+                            mat = extracted_state @ extracted_state.T
+                            eigen_score = torch.linalg.eigvals(mat).abs().mean().item()
+                        except:
+                            eigen_score = 0.0
+                        
                         uncertainty_info['layer_variances_by_strategy'][strategy] = var
+                        uncertainty_info['layer_rep_norm_by_strategy'][strategy] = rep_norm
+                        uncertainty_info['layer_eigen_score_by_strategy'][strategy] = eigen_score
                     else:
                         uncertainty_info['layer_variances_by_strategy'][strategy] = 0.0
+                        uncertainty_info['layer_rep_norm_by_strategy'][strategy] = 0.0
+                        uncertainty_info['layer_eigen_score_by_strategy'][strategy] = 0.0
 
             for i, entropy_val in enumerate(token_entropies):
                 max_prob_val = uncertainty_info['max_probabilities'][i] if i < len(uncertainty_info['max_probabilities']) else 0.5

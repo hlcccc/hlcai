@@ -287,6 +287,9 @@ def compute_pearsonr(uncertainty_scores, accuracies, num_bins=15):
     y = np.array(acc_list)
     
     # Calculate Pearson correlation
+    if len(X) < 2:
+        return 0.0, 1.0
+    
     r, p_value = pearsonr(X, y)
     
     return r, p_value
