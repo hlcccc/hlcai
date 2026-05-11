@@ -7,7 +7,13 @@ import accelerate
 
 from transformers import StoppingCriteria
 from transformers import StoppingCriteriaList, BitsAndBytesConfig
-from transformers import LlavaForConditionalGeneration, LlavaNextForConditionalGeneration, AutoProcessor, MllamaForConditionalGeneration, Blip2ForConditionalGeneration, AutoModelForCausalLM, AutoModel
+from transformers import LlavaForConditionalGeneration, AutoProcessor, MllamaForConditionalGeneration, Blip2ForConditionalGeneration, AutoModelForCausalLM, AutoModel
+
+try:
+    from transformers import LlavaNextForConditionalGeneration
+except ImportError:
+    LlavaNextForConditionalGeneration = None
+    print("Warning: LlavaNextForConditionalGeneration not available in current transformers version")
 from PIL import Image
 import numpy as np
 

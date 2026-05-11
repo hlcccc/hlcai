@@ -42,7 +42,7 @@ def get_chunk(lst, n, k):
 parser = argparse.ArgumentParser()
 parser.add_argument('--type_of_question', type=str)
 parser.add_argument('--num_generations_per_prompt', type=int, default=5)
-parser.add_argument('--fraction_of_data_to_use', type=float, default=0.9)
+parser.add_argument('--fraction_of_data_to_use', type=float, default=1.0)
 parser.add_argument('--model_path', type=str, default='facebook/opt-350m')
 parser.add_argument('--temperature', type=float, default=1.0)
 parser.add_argument('--top_p', type=float, default=1.0)
@@ -71,7 +71,7 @@ parser.add_argument("--record_uncertainty", action='store_true', default=True,
 parser.add_argument("--layer_strategy", type=str, default='last_layer',
                    choices=['25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling'],
                    help='Strategy for extracting hidden states from layers')
-parser.add_argument("--eval_all_layers", action='store_true', default=False,
+parser.add_argument("--eval_all_layers", action='store_true', default=True,
                    help='Evaluate all layer extraction strategies simultaneously')
 
 args = parser.parse_args()

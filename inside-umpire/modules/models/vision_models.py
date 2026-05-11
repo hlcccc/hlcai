@@ -7,7 +7,13 @@ import accelerate
 
 from transformers import StoppingCriteria
 from transformers import StoppingCriteriaList, BitsAndBytesConfig
-from transformers import LlavaForConditionalGeneration, LlavaNextForConditionalGeneration, AutoProcessor, MllamaForConditionalGeneration, Blip2ForConditionalGeneration, AutoModelForCausalLM, AutoModel
+from transformers import LlavaForConditionalGeneration, AutoProcessor, MllamaForConditionalGeneration, Blip2ForConditionalGeneration, AutoModelForCausalLM, AutoModel
+
+try:
+    from transformers import LlavaNextForConditionalGeneration
+except ImportError:
+    LlavaNextForConditionalGeneration = None
+    print("Warning: LlavaNextForConditionalGeneration not available in current transformers version")
 from PIL import Image
 import numpy as np
 
@@ -57,12 +63,14 @@ class VisionModel(BaseModel):
 
         if 'llava-next' in model_name.lower():
             
+            if LlavaNextForConditionalGeneration is None:
+                raise ImportError("LlavaNextForConditionalGeneration is not available. Please upgrade transformers: pip install transformers>=4.40.0")
+            
             self.processor = AutoProcessor.from_pretrained(model_name)
             self.model = LlavaNextForConditionalGeneration.from_pretrained(model_name,
                                                                            torch_dtype=torch.float16,
                                                                            low_cpu_mem_usage=True,
                                                                            load_in_4bit=True,
-                                                                           use_flash_attention_2=True,
                                                                            device_map='auto')
             self.tokenizer = self.processor.tokenizer
             if hasattr(self.model.config, "max_sequence_length"):
@@ -72,17 +80,11 @@ class VisionModel(BaseModel):
         elif 'llava' in model_name.lower():
             self.processor = AutoProcessor.from_pretrained(model_name)
 
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16
-            )
-
             self.model = LlavaForConditionalGeneration.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True,
-                quantization_config=quantization_config,
-                device_map='auto'
+                device_map='cuda'
             )
             self.tokenizer = self.processor.tokenizer
             if hasattr(self.model.config, "max_sequence_length"):
@@ -95,7 +97,6 @@ class VisionModel(BaseModel):
                                                     torch_dtype=torch.float16,
                                                     low_cpu_mem_usage=True,
                                                     load_in_4bit=True,
-                                                    use_flash_attention_2=True,
                                                     device_map='auto')
             self.tokenizer = self.processor.tokenizer
             if hasattr(self.model.config, "max_sequence_length"):

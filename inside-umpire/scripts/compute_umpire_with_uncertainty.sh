@@ -2,7 +2,7 @@
 # This script computes UMPIRE with uncertainty quantification and early warning mechanism.
 # Based on INSIDE paper approach for hallucination detection
 
-gpu_list="${CUDA_VISIBLE_DEVICES:-0}"
+gpu_list="${CUDA_VISIBLE_DEVICES:-2}"
 IFS=',' read -ra GPULIST <<< "$gpu_list"
 CHUNKS=${#GPULIST[@]}
 
@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES=${GPULIST[$IDX]} python pipeline/generate_with_uncertainty.
         --temperature 1 \
         --top_p '0.9' \
         --num_generations_per_prompt 5 \
-        --fraction_of_data_to_use 0.01 \
+        --fraction_of_data_to_use 1.0 \
         --enable_early_warning \
         --entropy_threshold 0.7 \
         --variance_threshold 0.5 \
