@@ -230,7 +230,7 @@ def get_eos_token_hidden_state(hidden_states_tuple: tuple, sequence_length: int)
 def extract_layer_signal(hidden_states_tuple: tuple, strategy: str, sequence_length: int = None) -> torch.Tensor:
     """
     根据指定策略提取隐藏状态信号
-    strategy: '25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling'
+    strategy: '25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling', 'layer_X'
     """
     strategy = strategy.lower()
     
@@ -246,5 +246,52 @@ def extract_layer_signal(hidden_states_tuple: tuple, strategy: str, sequence_len
         return get_eos_token_hidden_state(hidden_states_tuple, sequence_length)
     elif strategy == 'mean_pooling':
         return get_mean_pooling(hidden_states_tuple)
+    elif strategy.startswith('layer_'):
+        try:
+            layer_idx = int(strategy.split('_')[1])
+            if 0 <= layer_idx < len(hidden_states_tuple):
+                return hidden_states_tuple[layer_idx]
+            else:
+                return None
+        except:
+            return None
     else:
         raise ValueError(f"Unknown layer extraction strategy: {strategy}")
+
+def compute_layer_statistics(hidden_state: torch.Tensor) -> dict:
+    """
+    提取隐藏状态的丰富统计特征
+    Returns: dict with mean, var, std, max, min, range, skew, kurtosis, norm
+    """
+    if hidden_state is None or not isinstance(hidden_state, torch.Tensor):
+        return {
+            'mean': 0.0,
+            'var': 0.0,
+            'std': 0.0,
+            'max': 0.0,
+            'min': 0.0,
+            'range': 0.0,
+            'skew': 0.0,
+            'kurt': 0.0,
+            'norm': 0.0
+        }
+    
+    flattened = hidden_state.flatten()
+    
+    mean_val = flattened.mean().item()
+    var_val = flattened.var().item()
+    std_val = flattened.std().item()
+    max_val = flattened.max().item()
+    min_val = flattened.min().item()
+    
+    return {
+        'mean': mean_val,
+        'var': var_val,
+        'std': std_val,
+        'max': max_val,
+        'min': min_val,
+        'range': max_val - min_val,
+        'skew': flattened.skew().item() if len(flattened) > 1 else 0.0,
+        'kurt': flattened.kurtosis().item() if len(flattened) > 1 else 0.0,
+        'norm': hidden_state.norm(dim=-1).mean().item()
+    }

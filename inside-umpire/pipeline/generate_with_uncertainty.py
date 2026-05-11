@@ -24,7 +24,14 @@ from modules.uncertainty_utils import (
     extract_intermediate_states,
     extract_layer_signal,
     get_mean_pooling,
-    get_last_layer
+    get_last_layer,
+    compute_layer_statistics
+)
+from modules.layer_ablation_utils import (
+    compute_logdet,
+    compute_eigen_score,
+    compute_incoherence_score,
+    compute_layer_ablation_features
 )
 
 def split_list(lst, n):
@@ -192,13 +199,15 @@ def predict_with_uncertainty(model, input_data, temperature, top_p, enable_early
     
     layer_strategies_to_eval = []
     if args.eval_all_layers:
-        layer_strategies_to_eval = ['25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling']
+        layer_strategies_to_eval = [
+            'layer_0', 'layer_3', 'layer_6', 'layer_9', 
+            'layer_12', 'layer_15', 'layer_18', 'layer_21',
+            'last_layer', 'mean_pooling'
+        ]
     else:
         layer_strategies_to_eval = [args.layer_strategy]
     
-    uncertainty_info['layer_variances_by_strategy'] = {}
-    uncertainty_info['layer_rep_norm_by_strategy'] = {}
-    uncertainty_info['layer_eigen_score_by_strategy'] = {}
+    uncertainty_info['layer_features_by_strategy'] = {}
 
     if args.enable_early_warning:
         monitor = EarlyWarningMonitor(
@@ -272,25 +281,17 @@ def predict_with_uncertainty(model, input_data, temperature, top_p, enable_early
                 layer_variances = compute_layer_wise_variance(hidden)
                 uncertainty_info['layer_variances'] = layer_variances
                 
+                if idx == 0 and ans_id == 0:
+                    print(f"Debug: num layers in hidden: {len(hidden)}")
+                
                 for strategy in layer_strategies_to_eval:
                     extracted_state = extract_layer_signal(hidden, strategy, n_generated)
-                    if extracted_state is not None and isinstance(extracted_state, torch.Tensor):
-                        var = extracted_state.var(dim=0).mean().item()
-                        rep_norm = extracted_state.norm(dim=-1).mean().item()
-                        
-                        try:
-                            mat = extracted_state @ extracted_state.T
-                            eigen_score = torch.linalg.eigvals(mat).abs().mean().item()
-                        except:
-                            eigen_score = 0.0
-                        
-                        uncertainty_info['layer_variances_by_strategy'][strategy] = var
-                        uncertainty_info['layer_rep_norm_by_strategy'][strategy] = rep_norm
-                        uncertainty_info['layer_eigen_score_by_strategy'][strategy] = eigen_score
-                    else:
-                        uncertainty_info['layer_variances_by_strategy'][strategy] = 0.0
-                        uncertainty_info['layer_rep_norm_by_strategy'][strategy] = 0.0
-                        uncertainty_info['layer_eigen_score_by_strategy'][strategy] = 0.0
+                    features = compute_layer_ablation_features(extracted_state)
+                    uncertainty_info['layer_features_by_strategy'][strategy] = features
+                    
+                    if idx == 0 and ans_id == 0:
+                        print(f"Debug: idx={idx}, strategy={strategy}")
+                        print(f"  Features: {features}")
 
             for i, entropy_val in enumerate(token_entropies):
                 max_prob_val = uncertainty_info['max_probabilities'][i] if i < len(uncertainty_info['max_probabilities']) else 0.5

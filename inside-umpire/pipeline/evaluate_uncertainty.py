@@ -76,20 +76,11 @@ print("adaptive prob alpha", prob_param)
 
 image_df['umpire'] = image_df.apply(lambda x: compute_probL1_logdet(x, alpha=prob_param), axis=1)
 
-def compute_layer_variance_by_strategy(uncertainty_info, strategy):
-    if not uncertainty_info or 'layer_variances_by_strategy' not in uncertainty_info:
+def get_layer_feature_by_strategy(uncertainty_info, strategy, feature_name):
+    if not uncertainty_info or 'layer_features_by_strategy' not in uncertainty_info:
         return 0.0
-    return uncertainty_info['layer_variances_by_strategy'].get(strategy, 0.0)
-
-def compute_layer_rep_norm_by_strategy(uncertainty_info, strategy):
-    if not uncertainty_info or 'layer_rep_norm_by_strategy' not in uncertainty_info:
-        return 0.0
-    return uncertainty_info['layer_rep_norm_by_strategy'].get(strategy, 0.0)
-
-def compute_layer_eigen_score_by_strategy(uncertainty_info, strategy):
-    if not uncertainty_info or 'layer_eigen_score_by_strategy' not in uncertainty_info:
-        return 0.0
-    return uncertainty_info['layer_eigen_score_by_strategy'].get(strategy, 0.0)
+    features = uncertainty_info['layer_features_by_strategy'].get(strategy, {})
+    return features.get(feature_name, 0.0)
 
 def get_uncertainty_signal(row, signal_type='avg_entropy'):
     if 'uncertainty_info' not in row:
@@ -105,15 +96,12 @@ def get_uncertainty_signal(row, signal_type='avg_entropy'):
             uncertainty_values.append(compute_early_stop_indicator(uncertainty_info))
         elif signal_type == 'generation_diversity':
             uncertainty_values.append(compute_generation_diversity(row.get('generations_text', [])))
-        elif signal_type.startswith('layer_variance_'):
-            strategy = signal_type.replace('layer_variance_', '')
-            uncertainty_values.append(compute_layer_variance_by_strategy(uncertainty_info, strategy))
-        elif signal_type.startswith('layer_rep_norm_'):
-            strategy = signal_type.replace('layer_rep_norm_', '')
-            uncertainty_values.append(compute_layer_rep_norm_by_strategy(uncertainty_info, strategy))
-        elif signal_type.startswith('layer_eigen_score_'):
-            strategy = signal_type.replace('layer_eigen_score_', '')
-            uncertainty_values.append(compute_layer_eigen_score_by_strategy(uncertainty_info, strategy))
+        elif signal_type.startswith('layer_'):
+            parts = signal_type.split('_')
+            if len(parts) >= 3:
+                feature_name = parts[1]
+                strategy = '_'.join(parts[2:])
+                uncertainty_values.append(get_layer_feature_by_strategy(uncertainty_info, strategy, feature_name))
 
     if not uncertainty_values:
         return 0.0
@@ -138,18 +126,27 @@ image_df['uncertainty_early_stop_rate'] = image_df.apply(lambda x: get_uncertain
 image_df['uncertainty_generation_diversity'] = image_df.apply(lambda x: get_uncertainty_signal(x, 'generation_diversity'), axis=1)
 image_df['combined_uncertainty'] = image_df.apply(lambda x: get_per_sample_uncertainty(x, alpha=args.uncertainty_weight), axis=1)
 
-layer_strategies = ['25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling']
-layer_signal_types = ['variance', 'rep_norm', 'eigen_score']
+layer_strategies = [
+    'layer_0', 'layer_3', 'layer_6', 'layer_9', 
+    'layer_12', 'layer_15', 'layer_18', 'layer_21',
+    'last_layer', 'mean_pooling'
+]
+layer_feature_types = [
+    'var', 'std', 'norm', 'eigen_score', 'logdet', 'incoherence',
+    'mean', 'max', 'min', 'range', 'skew', 'kurt', 'spectral_norm'
+]
 
 for strategy in layer_strategies:
-    strategy_name = strategy.replace('%', 'pct')
-    for signal_type in layer_signal_types:
-        col_name = f'uncertainty_layer_{signal_type}_{strategy_name}'
-        image_df[col_name] = image_df.apply(lambda x, s=strategy, t=signal_type: get_uncertainty_signal(x, f'layer_{t}_{s}'), axis=1)
+    strategy_name = strategy.replace('%', 'pct').replace('layer_', '')
+    for feature_type in layer_feature_types:
+        col_name = f'uncertainty_layer_{feature_type}_{strategy_name}'
+        image_df[col_name] = image_df.apply(lambda x, s=strategy, t=feature_type: get_uncertainty_signal(x, f'layer_{t}_{s}'), axis=1)
 
 layer_columns = []
-for signal_type in layer_signal_types:
-    layer_columns.extend([f'uncertainty_layer_{signal_type}_{s.replace("%", "pct")}' for s in layer_strategies])
+for feature_type in layer_feature_types:
+    for strategy in layer_strategies:
+        strategy_name = strategy.replace('%', 'pct').replace('layer_', '')
+        layer_columns.append(f'uncertainty_layer_{feature_type}_{strategy_name}')
 
 unc_col_to_eval_list = ['umpire', 'uncertainty_avg_entropy', 'uncertainty_avg_confidence',
                         'uncertainty_early_stop_rate', 'uncertainty_generation_diversity',
