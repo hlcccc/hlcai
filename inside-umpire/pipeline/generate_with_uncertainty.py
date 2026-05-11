@@ -25,13 +25,9 @@ from modules.uncertainty_utils import (
     extract_layer_signal,
     get_mean_pooling,
     get_last_layer,
-    compute_layer_statistics
-)
-from modules.layer_ablation_utils import (
+    compute_layer_statistics,
     compute_logdet,
-    compute_eigen_score,
-    compute_incoherence_score,
-    compute_layer_ablation_features
+    compute_eigen_score
 )
 
 def split_list(lst, n):
@@ -286,7 +282,7 @@ def predict_with_uncertainty(model, input_data, temperature, top_p, enable_early
                 
                 for strategy in layer_strategies_to_eval:
                     extracted_state = extract_layer_signal(hidden, strategy, n_generated)
-                    features = compute_layer_ablation_features(extracted_state)
+                    features = compute_layer_statistics(extracted_state)
                     uncertainty_info['layer_features_by_strategy'][strategy] = features
                     
                     if idx == 0 and ans_id == 0:

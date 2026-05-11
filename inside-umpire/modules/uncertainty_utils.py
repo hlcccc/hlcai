@@ -1,237 +1,68 @@
 import torch
-import torch.nn.functional as F
 import numpy as np
-from typing import Tuple, List, Optional
 
-def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
-    probs = F.softmax(logits, dim=-1)
-    entropy = -torch.sum(probs * torch.log(probs + 1e-8), dim=-1)
-    return entropy
-
-def compute_token_entropy(logits: torch.Tensor) -> float:
-    entropy = compute_entropy(logits)
+def compute_entropy(logits: torch.Tensor) -> float:
+    probs = torch.softmax(logits, dim=-1)
+    log_probs = torch.log(probs + 1e-10)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
     return entropy.mean().item()
 
-def compute_sequence_entropy(scores_tuple: Tuple[torch.Tensor]) -> List[float]:
+def compute_sequence_entropy(scores: list) -> list:
     entropies = []
-    for logits in scores_tuple:
-        entropy = compute_token_entropy(logits)
-        entropies.append(entropy)
+    for logits in scores:
+        if logits is not None:
+            entropies.append(compute_entropy(logits))
+        else:
+            entropies.append(0.0)
     return entropies
 
-def compute_hidden_states_variance(hidden_states: torch.Tensor) -> torch.Tensor:
-    variance = torch.var(hidden_states, dim=0)
-    return variance.mean()
-
-def compute_layer_wise_variance(hidden_states_tuple: tuple) -> List[float]:
-    variances = []
-    for hidden_state in hidden_states_tuple:
-        if isinstance(hidden_state, torch.Tensor):
-            var = hidden_state.var(dim=0).mean().item()
-            variances.append(var)
-    return variances
-
-def compute_perplexity(logits: torch.Tensor) -> torch.Tensor:
-    return torch.exp(F.cross_entropy(logits, logits))
-
-def compute_token_probabilities(logits: torch.Tensor) -> torch.Tensor:
-    probs = F.softmax(logits, dim=-1)
-    return probs
-
 def compute_max_prob(logits: torch.Tensor) -> float:
-    probs = compute_token_probabilities(logits)
-    max_prob = probs.max(dim=-1)[0].mean().item()
-    return max_prob
-
-def compute_uncertainty_score(entropy: float, variance: float, alpha: float = 0.5) -> float:
-    normalized_entropy = entropy / (np.log(50000) + 1e-8)
-    normalized_variance = variance / (variance + 1e-8)
-    uncertainty_score = alpha * normalized_entropy + (1 - alpha) * normalized_variance
-    return uncertainty_score
-
-class EarlyWarningMonitor:
-    def __init__(
-        self,
-        entropy_threshold: float = 0.7,
-        variance_threshold: float = 0.5,
-        window_size: int = 3,
-        consecutive_threshold: int = 2
-    ):
-        self.entropy_threshold = entropy_threshold
-        self.variance_threshold = variance_threshold
-        self.window_size = window_size
-        self.consecutive_threshold = consecutive_threshold
-        self.entropy_history = []
-        self.variance_history = []
-        self.early_stop_triggered = False
-        self.stop_reason = None
-
-    def update(self, entropy: float, variance: Optional[float] = None):
-        self.entropy_history.append(entropy)
-        if variance is not None:
-            self.variance_history.append(variance)
-
-        if len(self.entropy_history) > self.window_size:
-            self.entropy_history.pop(0)
-        if len(self.variance_history) > self.window_size:
-            self.variance_history.pop(0)
-
-    def check_early_stop(self) -> Tuple[bool, Optional[str]]:
-        if len(self.entropy_history) < self.consecutive_threshold:
-            return False, None
-
-        recent_entropies = self.entropy_history[-self.consecutive_threshold:]
-        if all(e > self.entropy_threshold for e in recent_entropies):
-            self.early_stop_triggered = True
-            self.stop_reason = f"High entropy: {recent_entropies}"
-            return True, self.stop_reason
-
-        if self.variance_history:
-            recent_variances = self.variance_history[-self.consecutive_threshold:]
-            if all(v > self.variance_threshold for v in recent_variances):
-                self.early_stop_triggered = True
-                self.stop_reason = f"High variance: {recent_variances}"
-                return True, self.stop_reason
-
-        return False, None
-
-    def get_current_uncertainty(self) -> dict:
-        current_entropy = self.entropy_history[-1] if self.entropy_history else 0.0
-        current_variance = self.variance_history[-1] if self.variance_history else 0.0
-        avg_entropy = np.mean(self.entropy_history) if self.entropy_history else 0.0
-        avg_variance = np.mean(self.variance_history) if self.variance_history else 0.0
-
-        return {
-            'current_entropy': current_entropy,
-            'current_variance': current_variance,
-            'avg_entropy': avg_entropy,
-            'avg_variance': avg_variance,
-            'early_stop_triggered': self.early_stop_triggered,
-            'stop_reason': self.stop_reason
-        }
-
-    def reset(self):
-        self.entropy_history = []
-        self.variance_history = []
-        self.early_stop_triggered = False
-        self.stop_reason = None
-
-class AdaptiveThreshold:
-    def __init__(self, initial_threshold: float = 0.7, adjustment_factor: float = 1.1):
-        self.initial_threshold = initial_threshold
-        self.adjustment_factor = adjustment_factor
-        self.current_threshold = initial_threshold
-        self.history = []
-
-    def update(self, uncertainty_value: float):
-        self.history.append(uncertainty_value)
-        if len(self.history) >= 10:
-            recent_avg = np.mean(self.history[-10:])
-            if recent_avg < self.current_threshold * 0.8:
-                self.current_threshold *= self.adjustment_factor
-            elif recent_avg > self.current_threshold * 1.2:
-                self.current_threshold /= self.adjustment_factor
-
-    def get_threshold(self) -> float:
-        return self.current_threshold
-
-def compute_semantic_drift(hidden_states: torch.Tensor) -> float:
-    if len(hidden_states) < 2:
-        return 0.0
-
-    drifts = []
-    for i in range(1, len(hidden_states)):
-        if isinstance(hidden_states[i], torch.Tensor) and isinstance(hidden_states[i-1], torch.Tensor):
-            drift = torch.norm(hidden_states[i] - hidden_states[i-1]).item()
-            drifts.append(drift)
-
-    return np.mean(drifts) if drifts else 0.0
+    probs = torch.softmax(logits, dim=-1)
+    return probs.max().item()
 
 def compute_generation_confidence(entropy: float, max_prob: float) -> float:
-    confidence = 1.0 - (entropy / (np.log(50000) + 1e-8))
-    confidence = confidence * 0.5 + max_prob * 0.5
-    return confidence
+    return max_prob * (1 - entropy)
 
-def extract_intermediate_states(outputs, model_type='llava') -> dict:
-    if hasattr(outputs, 'hidden_states'):
-        hidden_states = outputs.hidden_states
-    elif hasattr(outputs, 'decoder_hidden_states'):
-        hidden_states = outputs.decoder_hidden_states
-    else:
-        hidden_states = None
-
-    if hasattr(outputs, 'scores'):
-        logits = outputs.scores
-    elif hasattr(outputs, 'logits'):
-        logits = outputs.logits
-    else:
-        logits = None
-
-    sequences = outputs.sequences if hasattr(outputs, 'sequences') else None
-
-    return {
-        'hidden_states': hidden_states,
-        'logits': logits,
-        'sequences': sequences
-    }
-
-def get_layer_by_percentage(hidden_states_tuple: tuple, percentage: float) -> torch.Tensor:
-    """
-    根据百分比获取特定层的隐藏状态
-    percentage: 0.0-1.0，例如0.25表示前25%层，0.5表示中间层，0.75表示后25%层
-    """
-    if not hidden_states_tuple:
-        return None
-    
-    num_layers = len(hidden_states_tuple)
-    layer_index = int(num_layers * percentage)
-    
-    # 确保索引有效
-    layer_index = max(0, min(layer_index, num_layers - 1))
-    
-    return hidden_states_tuple[layer_index]
+def compute_layer_wise_variance(hidden_states_tuple: tuple) -> list:
+    variances = []
+    for layer_idx, hidden in enumerate(hidden_states_tuple):
+        if hidden is not None:
+            var = hidden.var(dim=0).mean().item()
+        else:
+            var = 0.0
+        variances.append(var)
+    return variances
 
 def get_last_layer(hidden_states_tuple: tuple) -> torch.Tensor:
-    """获取最后一层的隐藏状态"""
-    if not hidden_states_tuple:
-        return None
-    return hidden_states_tuple[-1]
+    if len(hidden_states_tuple) > 0:
+        return hidden_states_tuple[-1]
+    return None
 
 def get_mean_pooling(hidden_states_tuple: tuple) -> torch.Tensor:
-    """对所有层进行mean pooling"""
-    if not hidden_states_tuple:
+    valid_layers = [h for h in hidden_states_tuple if h is not None]
+    if len(valid_layers) == 0:
         return None
-    
-    valid_layers = [h for h in hidden_states_tuple if isinstance(h, torch.Tensor)]
-    if not valid_layers:
-        return None
-    
-    stacked = torch.stack(valid_layers)
-    return stacked.mean(dim=0)
+    return torch.stack(valid_layers).mean(dim=0)
 
-def get_eos_token_hidden_state(hidden_states_tuple: tuple, sequence_length: int) -> torch.Tensor:
-    """
-    获取最后一个token（EOS）的隐藏状态
-    从最后一层提取最后一个token的表示
-    """
-    if not hidden_states_tuple:
+def get_layer_by_percentage(hidden_states_tuple: tuple, percentage: float) -> torch.Tensor:
+    num_layers = len(hidden_states_tuple)
+    if num_layers == 0:
         return None
-    
+    layer_idx = int(num_layers * percentage)
+    layer_idx = min(layer_idx, num_layers - 1)
+    return hidden_states_tuple[layer_idx]
+
+def get_eos_token_hidden_state(hidden_states_tuple: tuple, sequence_length: int = None) -> torch.Tensor:
+    if len(hidden_states_tuple) == 0:
+        return None
     last_layer = hidden_states_tuple[-1]
-    if not isinstance(last_layer, torch.Tensor):
+    if last_layer is None:
         return None
-    
-    # 获取最后一个token的隐藏状态
-    # last_layer shape: (batch_size, sequence_length, hidden_dim)
-    if len(last_layer.shape) >= 2:
-        return last_layer[:, -1, :] if last_layer.shape[0] > 1 else last_layer[-1, :]
-    return last_layer
+    if sequence_length is not None and sequence_length > 0:
+        return last_layer[sequence_length - 1]
+    return last_layer[-1]
 
 def extract_layer_signal(hidden_states_tuple: tuple, strategy: str, sequence_length: int = None) -> torch.Tensor:
-    """
-    根据指定策略提取隐藏状态信号
-    strategy: '25%', '50%', '75%', 'last_layer', 'eos', 'mean_pooling', 'layer_X'
-    """
     strategy = strategy.lower()
     
     if strategy == '25%':
@@ -258,11 +89,42 @@ def extract_layer_signal(hidden_states_tuple: tuple, strategy: str, sequence_len
     else:
         raise ValueError(f"Unknown layer extraction strategy: {strategy}")
 
+def compute_logdet(hidden_states: torch.Tensor, eps: float = 1e-6) -> float:
+    if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
+        return 0.0
+    
+    if hidden_states.ndim > 2:
+        hidden_states = hidden_states.mean(dim=1)
+    
+    if hidden_states.ndim == 1:
+        hidden_states = hidden_states.unsqueeze(0)
+    
+    try:
+        cov = hidden_states.T @ hidden_states
+        cov = cov + eps * torch.eye(cov.shape[0], device=cov.device)
+        return torch.logdet(cov).item()
+    except Exception as e:
+        return 0.0
+
+def compute_eigen_score(hidden_states: torch.Tensor) -> float:
+    if hidden_states is None or not isinstance(hidden_states, torch.Tensor):
+        return 0.0
+    
+    if hidden_states.ndim > 2:
+        hidden_states = hidden_states.mean(dim=1)
+    
+    if hidden_states.ndim == 1:
+        hidden_states = hidden_states.unsqueeze(0)
+    
+    try:
+        cov = hidden_states.T @ hidden_states
+        vals = torch.linalg.eigvalsh(cov)
+        return vals.abs().mean().item()
+    except Exception as e:
+        return 0.0
+
 def compute_layer_statistics(hidden_state: torch.Tensor) -> dict:
-    """
-    提取隐藏状态的丰富统计特征
-    Returns: dict with mean, var, std, max, min, range, skew, kurtosis, norm
-    """
+    """提取丰富的统计特征"""
     if hidden_state is None or not isinstance(hidden_state, torch.Tensor):
         return {
             'mean': 0.0,
@@ -273,16 +135,27 @@ def compute_layer_statistics(hidden_state: torch.Tensor) -> dict:
             'range': 0.0,
             'skew': 0.0,
             'kurt': 0.0,
-            'norm': 0.0
+            'norm': 0.0,
+            'logdet': 0.0,
+            'eigen_score': 0.0
         }
     
     flattened = hidden_state.flatten()
+    np_flattened = flattened.cpu().numpy()
     
     mean_val = flattened.mean().item()
     var_val = flattened.var().item()
     std_val = flattened.std().item()
     max_val = flattened.max().item()
     min_val = flattened.min().item()
+    
+    if len(np_flattened) > 1:
+        from scipy.stats import skew, kurtosis
+        skew_val = float(skew(np_flattened))
+        kurt_val = float(kurtosis(np_flattened))
+    else:
+        skew_val = 0.0
+        kurt_val = 0.0
     
     return {
         'mean': mean_val,
@@ -291,7 +164,93 @@ def compute_layer_statistics(hidden_state: torch.Tensor) -> dict:
         'max': max_val,
         'min': min_val,
         'range': max_val - min_val,
-        'skew': flattened.skew().item() if len(flattened) > 1 else 0.0,
-        'kurt': flattened.kurtosis().item() if len(flattened) > 1 else 0.0,
-        'norm': hidden_state.norm(dim=-1).mean().item()
+        'skew': skew_val,
+        'kurt': kurt_val,
+        'norm': hidden_state.norm(dim=-1).mean().item(),
+        'logdet': compute_logdet(hidden_state),
+        'eigen_score': compute_eigen_score(hidden_state)
     }
+
+def extract_intermediate_states(model_outputs):
+    scores = []
+    hidden_states = None
+    
+    if hasattr(model_outputs, 'scores') and model_outputs.scores is not None:
+        scores = [s.detach().cpu() for s in model_outputs.scores]
+    
+    if hasattr(model_outputs, 'hidden_states') and model_outputs.hidden_states is not None:
+        hidden_states = tuple(h.detach().cpu() for h in model_outputs.hidden_states)
+    
+    return scores, hidden_states
+
+class EarlyWarningMonitor:
+    def __init__(self, entropy_threshold=0.7, variance_threshold=0.5, consecutive_threshold=2):
+        self.entropy_threshold = entropy_threshold
+        self.variance_threshold = variance_threshold
+        self.consecutive_threshold = consecutive_threshold
+        self.consecutive_high_uncertainty = 0
+        self.triggered = False
+    
+    def check_early_stop(self, entropy=None, variance=None):
+        is_high = False
+        
+        if entropy is not None and entropy > self.entropy_threshold:
+            is_high = True
+        if variance is not None and variance > self.variance_threshold:
+            is_high = True
+        
+        if is_high:
+            self.consecutive_high_uncertainty += 1
+            if self.consecutive_high_uncertainty >= self.consecutive_threshold:
+                self.triggered = True
+                return True
+        else:
+            self.consecutive_high_uncertainty = 0
+        
+        return False
+    
+    def reset(self):
+        self.consecutive_high_uncertainty = 0
+        self.triggered = False
+
+class AdaptiveThreshold:
+    def __init__(self, initial_alpha=1.0, learning_rate=0.01):
+        self.alpha = initial_alpha
+        self.learning_rate = learning_rate
+    
+    def update(self, error_rate):
+        self.alpha = self.alpha + self.learning_rate * (error_rate - 0.5)
+        self.alpha = max(0.1, min(2.0, self.alpha))
+        return self.alpha
+
+def compute_uncertainty_score(entropy: float, confidence: float, early_stop_rate: float, 
+                              alpha: float = 0.4, beta: float = 0.3, gamma: float = 0.3) -> float:
+    return alpha * entropy + beta * (1 - confidence) + gamma * early_stop_rate
+
+def compute_early_stop_indicator(uncertainty_info: dict) -> float:
+    if not uncertainty_info:
+        return 0.0
+    return uncertainty_info.get('early_stop_triggered', 0.0)
+
+def compute_avg_token_entropy(uncertainty_info: dict) -> float:
+    if not uncertainty_info:
+        return 0.0
+    entropies = uncertainty_info.get('token_entropies', [])
+    if len(entropies) == 0:
+        return 0.0
+    return np.mean(entropies)
+
+def compute_avg_confidence(uncertainty_info: dict) -> float:
+    if not uncertainty_info:
+        return 0.0
+    confidence_scores = uncertainty_info.get('confidence_scores', [])
+    if len(confidence_scores) == 0:
+        return 0.0
+    return np.mean(confidence_scores)
+
+def compute_generation_diversity(generations: list) -> float:
+    if len(generations) < 2:
+        return 0.0
+    
+    unique_gens = len(set(generations))
+    return unique_gens / len(generations)

@@ -132,8 +132,8 @@ layer_strategies = [
     'last_layer', 'mean_pooling'
 ]
 layer_feature_types = [
-    'var', 'std', 'norm', 'eigen_score', 'logdet', 'incoherence',
-    'mean', 'max', 'min', 'range', 'skew', 'kurt', 'spectral_norm'
+    'mean', 'var', 'std', 'max', 'min', 'range', 
+    'skew', 'kurt', 'norm', 'logdet', 'eigen_score'
 ]
 
 for strategy in layer_strategies:
