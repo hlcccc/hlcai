@@ -11,7 +11,7 @@ def main():
 
     print('Loading data...')
     with open(data_path, 'rb') as f:
-        llava_results = pickle.load(r)
+        llava_results = pickle.load(f)
 
     image_df = pd.DataFrame().from_dict(llava_results)
     print(f'Loaded {len(image_df)} samples')
