@@ -1,0 +1,7 @@
+{
+    "total_samples": 5046,
+    "samples_with_early_stop": 1003,
+    "avg_early_stop_rate": 9.012036283917244e-17,
+    "avg_token_entropy": -3.379513606468966e-17,
+    "avg_confidence": 1.7235519392991728e-15
+}

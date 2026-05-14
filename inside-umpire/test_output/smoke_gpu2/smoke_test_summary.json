@@ -1,0 +1,8 @@
+{
+  "total_samples": 5,
+  "num_generations_per_prompt": 2,
+  "smoke_test": true,
+  "samples_with_early_stop": 5,
+  "avg_early_stop_rate": 1.0,
+  "avg_online_uncertainty": 0.9145345665764666
+}

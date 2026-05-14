@@ -36,3 +36,5 @@ requirements.txt
 *.tmp
 *.swp
 .DS_Store
+
+inside-umpire/test_output/new_generation_gpu2_eval/evaluation_results_with_features.pkl

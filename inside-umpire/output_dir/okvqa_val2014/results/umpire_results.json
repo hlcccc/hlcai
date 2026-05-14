@@ -1,0 +1,10 @@
+{
+    "umpire":{
+        "auc":0.744,
+        "cece":0.092,
+        "pearsonr":0.946,
+        "tpr_at_0.1_fpr":0.325,
+        "tpr_at_0.01_fpr":0.062,
+        "aurac":0.797
+    }
+}
