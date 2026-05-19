@@ -1,8 +1,10 @@
 import argparse
 import os
 import pickle
+import re
 import sys
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -41,6 +43,22 @@ parser.add_argument("--generation_file", type=str, required=True)
 parser.add_argument("--output_dir", type=str, required=True)
 parser.add_argument("--jitter", type=float, default=1e-8)
 parser.add_argument("--uncertainty_weight", type=float, default=0.5)
+parser.add_argument("--layer_plot_metric", type=str, default="auc")
+parser.add_argument("--layer_analysis_scope", type=str, default="representative", choices=["representative", "all"])
+
+
+REPRESENTATIVE_LAYER_STRATEGIES = [
+    "layer_0",
+    "layer_3",
+    "layer_6",
+    "layer_9",
+    "layer_12",
+    "layer_15",
+    "layer_18",
+    "layer_21",
+    "last_layer",
+    "mean_pooling",
+]
 
 
 def safe_mean(values, default=0.0):
@@ -122,7 +140,165 @@ def discover_layer_strategies(df):
             strategies.update(uncertainty_info.get("layer_features_by_strategy", {}).keys())
         if strategies:
             break
-    return sorted(strategies, key=lambda x: (not x.startswith("layer_"), x))
+    return sort_layer_strategies(strategies)
+
+
+def get_layer_order(strategy):
+    if strategy == "last_layer":
+        return 10_000
+    if strategy == "mean_pooling":
+        return 20_000
+    match = re.fullmatch(r"layer_(\d+)", strategy)
+    if match:
+        return int(match.group(1))
+    return 30_000
+
+
+def sort_layer_strategies(strategies):
+    return sorted(strategies, key=lambda strategy: (get_layer_order(strategy), strategy))
+
+
+def select_layer_strategies_for_analysis(layer_strategies, scope="representative"):
+    sorted_layers = sort_layer_strategies(layer_strategies)
+    if scope == "all":
+        return sorted_layers
+    representative_layers = [layer for layer in REPRESENTATIVE_LAYER_STRATEGIES if layer in sorted_layers]
+    return representative_layers if representative_layers else sorted_layers
+
+
+def evaluate_scores_against_labels(scores, labels, eval_col):
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=int)
+    valid_idx = np.isfinite(scores)
+    if np.sum(valid_idx) < 2 or len(np.unique(labels[valid_idx])) < 2:
+        return None
+
+    valid_scores = scores[valid_idx]
+    valid_labels = labels[valid_idx]
+    method_df = pd.DataFrame({"score": valid_scores, eval_col: valid_labels})
+    wrong_scores = valid_scores[valid_labels == 0]
+    correct_scores = valid_scores[valid_labels == 1]
+    if len(wrong_scores) == 0 or len(correct_scores) == 0:
+        return None
+
+    try:
+        auc = roc_auc_score(1 - valid_labels, valid_scores)
+        cece = get_calibrate_ece(method_df, "score", eval_col=eval_col, num_bins=15, model_type="minmax")
+        pearsonr = np.abs(compute_pearsonr(valid_scores, valid_labels, num_bins=50)[0])
+        tpr_at_01 = get_tpr_at_fpr(correct_scores, wrong_scores, fpr_threshold=0.1)
+        tpr_at_001 = get_tpr_at_fpr(correct_scores, wrong_scores, fpr_threshold=0.01)
+        aurac = compute_aurac_from_image_df(method_df, "score", uncertainty=True, eval_col=eval_col)
+        return {
+            "auc": auc,
+            "cece": cece,
+            "pearsonr": pearsonr,
+            "tpr_at_0.1_fpr": tpr_at_01,
+            "tpr_at_0.01_fpr": tpr_at_001,
+            "aurac": aurac,
+        }
+    except Exception as exc:
+        print(f"Error evaluating layer scores: {exc}")
+        return None
+
+
+def evaluate_layer_signals(image_df, labels, eval_col, layer_strategies, layer_feature_types):
+    layered_results = {}
+    for feature_type in layer_feature_types:
+        signal_name = f"layer_{feature_type}"
+        per_layer_results = {}
+        for strategy in layer_strategies:
+            strategy_name = strategy.replace("%", "pct").replace("layer_", "")
+            col_name = f"uncertainty_layer_{feature_type}_{strategy_name}"
+            if col_name not in image_df.columns:
+                continue
+            result = evaluate_scores_against_labels(image_df[col_name].values, labels, eval_col)
+            if result is not None:
+                per_layer_results[strategy] = result
+        if per_layer_results:
+            layered_results[signal_name] = per_layer_results
+    return layered_results
+
+
+def build_layer_metric_table(layered_results):
+    metric_names = []
+    for per_layer_results in layered_results.values():
+        for metrics in per_layer_results.values():
+            for metric_name in metrics.keys():
+                if metric_name not in metric_names:
+                    metric_names.append(metric_name)
+
+    rows = []
+    for signal_name in sorted(layered_results.keys()):
+        per_layer_results = layered_results[signal_name]
+        for layer in sort_layer_strategies(per_layer_results.keys()):
+            row = {
+                "signal": signal_name,
+                "layer": layer,
+                "layer_order": get_layer_order(layer),
+            }
+            row.update(per_layer_results[layer])
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(columns=["signal", "layer", "layer_order"] + metric_names)
+
+    return pd.DataFrame(rows).sort_values(
+        by=["signal", "layer_order", "layer"],
+        kind="stable",
+    )[["signal", "layer", "layer_order"] + metric_names].reset_index(drop=True)
+
+
+def plot_layer_metric_trends(layer_metric_df, output_dir, metric_name="auc"):
+    if layer_metric_df.empty or metric_name not in layer_metric_df.columns:
+        return []
+
+    os.makedirs(output_dir, exist_ok=True)
+    generated_paths = []
+    for signal_name, signal_df in layer_metric_df.groupby("signal", sort=True):
+        signal_df = signal_df.sort_values(by=["layer_order", "layer"], kind="stable")
+        plt.figure(figsize=(10, 5))
+        plt.plot(signal_df["layer"], signal_df[metric_name], marker="o", linewidth=2)
+        plt.title(f"{signal_name} {metric_name} by layer")
+        plt.xlabel("Layer")
+        plt.ylabel(metric_name.upper())
+        plt.xticks(rotation=45, ha="right")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.tight_layout()
+
+        plot_path = os.path.join(output_dir, f"{signal_name}_{metric_name}_by_layer.png")
+        plt.savefig(plot_path, dpi=200)
+        plt.close()
+        generated_paths.append(plot_path)
+
+    combined_plot_path = plot_all_layer_signals(layer_metric_df, output_dir, metric_name=metric_name)
+    if combined_plot_path is not None:
+        generated_paths.append(combined_plot_path)
+
+    return generated_paths
+
+
+def plot_all_layer_signals(layer_metric_df, output_dir, metric_name="auc"):
+    if layer_metric_df.empty or metric_name not in layer_metric_df.columns:
+        return None
+
+    os.makedirs(output_dir, exist_ok=True)
+    plt.figure(figsize=(14, 7))
+    for signal_name, signal_df in layer_metric_df.groupby("signal", sort=True):
+        signal_df = signal_df.sort_values(by=["layer_order", "layer"], kind="stable")
+        plt.plot(signal_df["layer"], signal_df[metric_name], marker="o", linewidth=1.8, label=signal_name)
+
+    plt.title(f"All signals {metric_name} by layer")
+    plt.xlabel("Layer")
+    plt.ylabel(metric_name.upper())
+    plt.xticks(rotation=45, ha="right")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
+    plt.tight_layout()
+
+    plot_path = os.path.join(output_dir, f"all_layer_signals_{metric_name}_by_layer.png")
+    plt.savefig(plot_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    return plot_path
 
 
 def sanitize_feature_block(df, columns):
@@ -173,7 +349,11 @@ def main():
         lambda row: get_row_signal(row, "online_uncertainty"), axis=1
     )
 
-    layer_strategies = discover_layer_strategies(image_df)
+    all_layer_strategies = discover_layer_strategies(image_df)
+    analysis_layer_strategies = select_layer_strategies_for_analysis(
+        all_layer_strategies,
+        scope=args.layer_analysis_scope,
+    )
     layer_feature_types = [
         "mean",
         "var",
@@ -192,7 +372,7 @@ def main():
 
     print("\nExtracting layer features...")
     all_layer_feature_cols = []
-    for strategy in layer_strategies:
+    for strategy in all_layer_strategies:
         strategy_name = strategy.replace("%", "pct").replace("layer_", "")
         for feature_type in layer_feature_types:
             col_name = f"uncertainty_layer_{feature_type}_{strategy_name}"
@@ -230,7 +410,7 @@ def main():
     for feature_type in layer_feature_types:
         layer_cols = [
             f"uncertainty_layer_{feature_type}_{s.replace('%', 'pct').replace('layer_', '')}"
-            for s in layer_strategies
+            for s in all_layer_strategies
         ]
         valid_cols = [col for col in layer_cols if col in image_df.columns]
         if valid_cols:
@@ -277,39 +457,6 @@ def main():
     print("STEP 4: Evaluating all uncertainty methods")
     print("=" * 60)
 
-    def evaluate_method(name, scores):
-        scores = np.asarray(scores, dtype=np.float64)
-        valid_idx = np.isfinite(scores)
-        if np.sum(valid_idx) < 2 or len(np.unique(labels[valid_idx])) < 2:
-            return None
-
-        valid_scores = scores[valid_idx]
-        valid_labels = labels[valid_idx]
-        method_df = pd.DataFrame({"score": valid_scores, eval_col: valid_labels})
-        wrong_scores = valid_scores[valid_labels == 0]
-        correct_scores = valid_scores[valid_labels == 1]
-        if len(wrong_scores) == 0 or len(correct_scores) == 0:
-            return None
-
-        try:
-            auc = roc_auc_score(1 - valid_labels, valid_scores)
-            cece = get_calibrate_ece(method_df, "score", eval_col=eval_col, num_bins=15, model_type="minmax")
-            pearsonr = np.abs(compute_pearsonr(valid_scores, valid_labels, num_bins=50)[0])
-            tpr_at_01 = get_tpr_at_fpr(correct_scores, wrong_scores, fpr_threshold=0.1)
-            tpr_at_001 = get_tpr_at_fpr(correct_scores, wrong_scores, fpr_threshold=0.01)
-            aurac = compute_aurac_from_image_df(method_df, "score", uncertainty=True, eval_col=eval_col)
-            return {
-                "auc": auc,
-                "cece": cece,
-                "pearsonr": pearsonr,
-                "tpr_at_0.1_fpr": tpr_at_01,
-                "tpr_at_0.01_fpr": tpr_at_001,
-                "aurac": aurac,
-            }
-        except Exception as exc:
-            print(f"Error evaluating {name}: {exc}")
-            return None
-
     results = {}
     baseline_methods = [
         ("umpire", image_df["umpire"].values),
@@ -324,7 +471,7 @@ def main():
 
     print("\n--- Baseline Methods ---")
     for name, scores in baseline_methods:
-        result = evaluate_method(name, scores)
+        result = evaluate_scores_against_labels(scores, labels, eval_col)
         if result:
             results[name] = result
             print(f"{name}: AUC = {result['auc']:.4f}")
@@ -336,7 +483,7 @@ def main():
 
     print("\n--- Fusion Methods ---")
     for name, scores in fusion_methods:
-        result = evaluate_method(name, scores)
+        result = evaluate_scores_against_labels(scores, labels, eval_col)
         if result:
             results[name] = result
             print(f"{name}: AUC = {result['auc']:.4f}")
@@ -354,9 +501,37 @@ def main():
         orient="index",
         indent=2,
     )
+
+    layered_results = evaluate_layer_signals(
+        image_df=image_df,
+        labels=labels,
+        eval_col=eval_col,
+        layer_strategies=analysis_layer_strategies,
+        layer_feature_types=layer_feature_types,
+    )
+    layer_metric_df = build_layer_metric_table(layered_results)
+    layer_metric_df.to_csv(
+        os.path.join(args.output_dir, "layer_signal_uncertainty_results.csv"),
+        index=False,
+    )
+    layer_metric_df.to_json(
+        os.path.join(args.output_dir, "layer_signal_uncertainty_results.json"),
+        orient="records",
+        indent=2,
+    )
+    plot_paths = plot_layer_metric_trends(
+        layer_metric_df,
+        args.output_dir,
+        metric_name=args.layer_plot_metric,
+    )
     image_df.to_pickle(os.path.join(args.output_dir, "evaluation_results_with_features.pkl"))
 
     print(f"\nResults saved to {args.output_dir}")
+    if not layer_metric_df.empty:
+        print("\nLayer signal analysis saved:")
+        print(f"  Table: {os.path.join(args.output_dir, 'layer_signal_uncertainty_results.csv')}")
+        print(f"  JSON:  {os.path.join(args.output_dir, 'layer_signal_uncertainty_results.json')}")
+        print(f"  Plots: {len(plot_paths)} files using metric '{args.layer_plot_metric}'")
 
     print("\n" + "=" * 80)
     print("FEATURE IMPORTANCE ANALYSIS")
